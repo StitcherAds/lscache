@@ -75,7 +75,7 @@
     }
 
     try {
-      setItem(key, value);
+      _setItem(key, value);
       removeItem(key);
       cachedStorage = true;
     } catch (e) {
@@ -142,7 +142,34 @@
     return localStorage.getItem(CACHE_PREFIX + cacheBucket + key);
   }
 
-  function setItem(key, value) {
+  /**
+   * setItem in localStorage 
+   * catches QuotaExceededErrors if thrown and releases enough space if necessary
+   */
+  function setItem(key, value){
+    try {
+      _setItem(key, value);
+    } catch (e) {
+      if (isOutOfSpace(e)) {
+        release((CACHE_PREFIX + cacheBucket + key).length + (value || '').length);
+        try {
+          _setItem(key, value);
+        } catch (e) {
+          // value may be larger than total quota
+          warn("Could not add item with key '" + key + "', perhaps it's too big?", e);
+          return;
+        }
+      } else {
+        // If it was some other error, just give up.
+        warn("Could not add item with key '" + key + "'", e);
+        return;
+      }
+    }
+  }
+
+  // actually performs the write to localStorage
+  // naming things is hard -_-
+  function _setItem(key, value) {
     // Fix for iPad issue - sometimes throws QUOTA_EXCEEDED_ERR on setItem.
     localStorage.removeItem(CACHE_PREFIX + cacheBucket + key);
     localStorage.setItem(CACHE_PREFIX + cacheBucket + key, value);
@@ -163,6 +190,44 @@
         fn(key, expirationKey(key));
       }
     }
+  }
+
+  function release(bytesNeeded){
+    // If we exceeded the quota, then we will sort
+    // by the expire time, and then remove the N oldest
+    var storedKeys = [];
+    var storedKey;
+    eachKey(function(key, exprKey) {
+      var expiration = getItem(exprKey);
+      if (expiration) {
+        expiration = parseInt(expiration, EXPIRY_RADIX);
+      } else {
+        // TODO: Store date added for non-expiring items for smarter removal
+        expiration = MAX_DATE;
+      }
+      storedKeys.push({
+        key: key,
+        size: key.length + (getItem(key) || '').length,
+        expiration: expiration
+      });
+    });
+    // Sorts the keys with oldest expiration time last
+    storedKeys.sort(function(a, b) { return (b.expiration-a.expiration); });
+
+    var releasedSize = 0;
+    var releasedKeys = [];
+    while (storedKeys.length && releasedSize < bytesNeeded) {
+      storedKey = storedKeys.pop();
+      flushItem(storedKey.key);
+      releasedKeys.push(storedKey.key);
+      releasedSize += storedKey.size;
+    }
+
+    if (releasedKeys.length) {
+      warn("Cache is full. Approx " + bytesNeeded + " bytes needed. Removed " + releasedKeys.length + " keys (~ " + releasedSize + " bytes) to make space.");
+    }
+
+    return releasedSize;
   }
 
   function flushItem(key) {
@@ -219,52 +284,8 @@
         }
       }
 
-      try {
-        setItem(key, value);
-      } catch (e) {
-        if (isOutOfSpace(e)) {
-          // If we exceeded the quota, then we will sort
-          // by the expire time, and then remove the N oldest
-          var storedKeys = [];
-          var storedKey;
-          eachKey(function(key, exprKey) {
-            var expiration = getItem(exprKey);
-            if (expiration) {
-              expiration = parseInt(expiration, EXPIRY_RADIX);
-            } else {
-              // TODO: Store date added for non-expiring items for smarter removal
-              expiration = MAX_DATE;
-            }
-            storedKeys.push({
-              key: key,
-              size: (getItem(key) || '').length,
-              expiration: expiration
-            });
-          });
-          // Sorts the keys with oldest expiration time last
-          storedKeys.sort(function(a, b) { return (b.expiration-a.expiration); });
-
-          var targetSize = (value||'').length;
-          while (storedKeys.length && targetSize > 0) {
-            storedKey = storedKeys.pop();
-            warn("Cache is full, removing item with key '" + key + "'");
-            flushItem(storedKey.key);
-            targetSize -= storedKey.size;
-          }
-          try {
-            setItem(key, value);
-          } catch (e) {
-            // value may be larger than total quota
-            warn("Could not add item with key '" + key + "', perhaps it's too big?", e);
-            return;
-          }
-        } else {
-          // If it was some other error, just give up.
-          warn("Could not add item with key '" + key + "'", e);
-          return;
-        }
-      }
-
+      setItem(key, value);
+      
       // If a time is specified, store expiration info in localStorage
       if (time) {
         setItem(expirationKey(key), (currentTime() + time).toString(EXPIRY_RADIX));

@@ -65,12 +65,23 @@ require=(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof requ
       return cachedStorage;
     }
 
+    // some browsers will throw an error if you try to access local storage (e.g. brave browser)
+    // hence check is inside a try/catch
     try {
-      setItem(key, value);
+      if (!localStorage) {
+        return false;
+      }
+    } catch (ex) {
+      return false;
+    }
+
+    try {
+      _setItem(key, value);
       removeItem(key);
       cachedStorage = true;
     } catch (e) {
-        if (isOutOfSpace(e)) {    // If we hit the limit, then it means we have support, 
+        // If we hit the limit, and we don't have an empty localStorage then it means we have support
+        if (isOutOfSpace(e) && localStorage.length) {
             cachedStorage = true; // just maxed it out and even the set test failed.
         } else {
             cachedStorage = false;
@@ -81,8 +92,8 @@ require=(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof requ
 
   // Check to set if the error is us dealing with being out of space
   function isOutOfSpace(e) {
-    if (e && e.name === 'QUOTA_EXCEEDED_ERR' || 
-            e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || 
+    if (e && e.name === 'QUOTA_EXCEEDED_ERR' ||
+            e.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
             e.name === 'QuotaExceededError') {
         return true;
     }
@@ -96,6 +107,15 @@ require=(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof requ
       cachedJSON = (window.JSON != null);
     }
     return cachedJSON;
+  }
+
+  /**
+   * Returns a string where all RegExp special characters are escaped with a \.
+   * @param {String} text
+   * @return {string}
+   */
+  function escapeRegExpSpecialCharacters(text) {
+    return text.replace(/[[\]{}()*+?.\\^$|]/g, '\\$&');
   }
 
   /**
@@ -123,7 +143,34 @@ require=(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof requ
     return localStorage.getItem(CACHE_PREFIX + cacheBucket + key);
   }
 
-  function setItem(key, value) {
+  /**
+   * setItem in localStorage 
+   * catches QuotaExceededErrors if thrown and releases enough space if necessary
+   */
+  function setItem(key, value){
+    try {
+      _setItem(key, value);
+    } catch (e) {
+      if (isOutOfSpace(e)) {
+        release((CACHE_PREFIX + cacheBucket + key).length + (value || '').length);
+        try {
+          _setItem(key, value);
+        } catch (e) {
+          // value may be larger than total quota
+          warn("Could not add item with key '" + key + "', perhaps it's too big?", e);
+          return;
+        }
+      } else {
+        // If it was some other error, just give up.
+        warn("Could not add item with key '" + key + "'", e);
+        return;
+      }
+    }
+  }
+
+  // actually performs the write to localStorage
+  // naming things is hard -_-
+  function _setItem(key, value) {
     // Fix for iPad issue - sometimes throws QUOTA_EXCEEDED_ERR on setItem.
     localStorage.removeItem(CACHE_PREFIX + cacheBucket + key);
     localStorage.setItem(CACHE_PREFIX + cacheBucket + key, value);
@@ -134,7 +181,7 @@ require=(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof requ
   }
 
   function eachKey(fn) {
-    var prefixRegExp = new RegExp('^' + CACHE_PREFIX + cacheBucket + '(.*)');
+    var prefixRegExp = new RegExp('^' + CACHE_PREFIX + escapeRegExpSpecialCharacters(cacheBucket) + '(.*)');
     // Loop in reverse as removing items will change indices of tail
     for (var i = localStorage.length-1; i >= 0 ; --i) {
       var key = localStorage.key(i);
@@ -144,6 +191,44 @@ require=(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof requ
         fn(key, expirationKey(key));
       }
     }
+  }
+
+  function release(bytesNeeded){
+    // If we exceeded the quota, then we will sort
+    // by the expire time, and then remove the N oldest
+    var storedKeys = [];
+    var storedKey;
+    eachKey(function(key, exprKey) {
+      var expiration = getItem(exprKey);
+      if (expiration) {
+        expiration = parseInt(expiration, EXPIRY_RADIX);
+      } else {
+        // TODO: Store date added for non-expiring items for smarter removal
+        expiration = MAX_DATE;
+      }
+      storedKeys.push({
+        key: key,
+        size: key.length + (getItem(key) || '').length,
+        expiration: expiration
+      });
+    });
+    // Sorts the keys with oldest expiration time last
+    storedKeys.sort(function(a, b) { return (b.expiration-a.expiration); });
+
+    var releasedSize = 0;
+    var releasedKeys = [];
+    while (storedKeys.length && releasedSize < bytesNeeded) {
+      storedKey = storedKeys.pop();
+      flushItem(storedKey.key);
+      releasedKeys.push(storedKey.key);
+      releasedSize += storedKey.size;
+    }
+
+    if (releasedKeys.length) {
+      warn("Cache is full. Approx " + bytesNeeded + " bytes needed. Removed " + releasedKeys.length + " keys (~ " + releasedSize + " bytes) to make space.");
+    }
+
+    return releasedSize;
   }
 
   function flushItem(key) {
@@ -200,52 +285,8 @@ require=(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof requ
         }
       }
 
-      try {
-        setItem(key, value);
-      } catch (e) {
-        if (isOutOfSpace(e)) {
-          // If we exceeded the quota, then we will sort
-          // by the expire time, and then remove the N oldest
-          var storedKeys = [];
-          var storedKey;
-          eachKey(function(key, exprKey) {
-            var expiration = getItem(exprKey);
-            if (expiration) {
-              expiration = parseInt(expiration, EXPIRY_RADIX);
-            } else {
-              // TODO: Store date added for non-expiring items for smarter removal
-              expiration = MAX_DATE;
-            }
-            storedKeys.push({
-              key: key,
-              size: (getItem(key) || '').length,
-              expiration: expiration
-            });
-          });
-          // Sorts the keys with oldest expiration time last
-          storedKeys.sort(function(a, b) { return (b.expiration-a.expiration); });
-
-          var targetSize = (value||'').length;
-          while (storedKeys.length && targetSize > 0) {
-            storedKey = storedKeys.pop();
-            warn("Cache is full, removing item with key '" + key + "'");
-            flushItem(storedKey.key);
-            targetSize -= storedKey.size;
-          }
-          try {
-            setItem(key, value);
-          } catch (e) {
-            // value may be larger than total quota
-            warn("Could not add item with key '" + key + "', perhaps it's too big?", e);
-            return;
-          }
-        } else {
-          // If it was some other error, just give up.
-          warn("Could not add item with key '" + key + "'", e);
-          return;
-        }
-      }
-
+      setItem(key, value);
+      
       // If a time is specified, store expiration info in localStorage
       if (time) {
         setItem(expirationKey(key), (currentTime() + time).toString(EXPIRY_RADIX));
@@ -349,7 +390,8 @@ require=(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof requ
   // Return the module
   return lscache;
 }));
-
+},{}],"qunit":[function(require,module,exports){
+module.exports=require('nCxwBE');
 },{}],"nCxwBE":[function(require,module,exports){
 (function (global){
 (function browserifyShim(module, exports, define, browserify_shim__define__module__export__) {
@@ -1970,8 +2012,6 @@ QUnit.diff = (function() {
 }).call(global, undefined, undefined, undefined, function defineExport(ex) { module.exports = ex; });
 
 }).call(this,typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],"qunit":[function(require,module,exports){
-module.exports=require('nCxwBE');
 },{}],4:[function(require,module,exports){
 /* jshint undef:true, browser:true, node:true */
 /* global QUnit, test, equal, asyncTest, start, define */
@@ -1996,6 +2036,15 @@ var startTests = function (lscache) {
       lscache.enableWarnings(false);
     }
   });
+
+  function getLocalStorageSize(){
+    var size = 0, keyIndex = 0, key = null;
+    while((key = localStorage.key(keyIndex))){
+      size = size + key.length + localStorage.getItem(key).length;
+      keyIndex++;
+    }
+    return size;
+  }
 
   test('Testing set() and get() with string', function() {
     var key = 'thekey';
@@ -2078,19 +2127,25 @@ var startTests = function (lscache) {
           break;
         }
       }
+
+      equal(getLocalStorageSize(), 2621200, "Expect localStorage size to be 2621200"); // 2.5mb limit in phantom js
+
       localStorage.clear();
+
+      equal(getLocalStorageSize(), 0, "Expect localStorage size to be 0");
 
       for (var i = 0; i <= num; i++) {
         lscache.set("key" + i, longString);
       }
 
       // Warnings not enabled, nothing should be logged
-      equal(window.console.calls, 0);
+      equal(window.console.calls, 0, "We expect that we have not triggered any warnings yet");
 
       lscache.enableWarnings(true);
 
-      lscache.set("key" + i, longString);
-      equal(window.console.calls, 1, "We expect one warning to have been printed");
+      // set a very long string, such that lscache will need to remove two other keys to make space for it
+      lscache.set("key" + i, longString + longString);
+      equal(window.console.calls, 2, "We expect two warnings to have been printed");
 
       window.console = null;
       lscache.set("key" + i, longString);
