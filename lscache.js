@@ -219,6 +219,19 @@
         }
       }
 
+      var bytesNeeded = key.length + (value||'').length;
+
+      // set up expirationKey and time
+      var expires = false, expiresInKey, expiresInValue;
+      if (time) {
+        expires = true;
+        expiresInKey = expirationKey(key);
+        expiresInValue = (currentTime() + time).toString(EXPIRY_RADIX);
+
+        // increase bytesNeeded to account for the additional item we will be setting for the cacheExpiration
+        bytesNeeded = bytesNeeded + expiresInKey.length + expiresInValue.length;
+      }
+
       try {
         setItem(key, value);
       } catch (e) {
@@ -237,14 +250,15 @@
             }
             storedKeys.push({
               key: key,
-              size: (getItem(key) || '').length,
+              size: key.length + (getItem(key) || '').length,
               expiration: expiration
             });
           });
           // Sorts the keys with oldest expiration time last
           storedKeys.sort(function(a, b) { return (b.expiration-a.expiration); });
 
-          var targetSize = (value||'').length;
+          var targetSize = bytesNeeded;
+
           while (storedKeys.length && targetSize > 0) {
             storedKey = storedKeys.pop();
             warn("Cache is full, removing item with key '" + key + "'");
@@ -266,11 +280,11 @@
       }
 
       // If a time is specified, store expiration info in localStorage
-      if (time) {
-        setItem(expirationKey(key), (currentTime() + time).toString(EXPIRY_RADIX));
+      if (expires) {
+        setItem(expiresInKey, expiresInValue);
       } else {
         // In case they previously set a time, remove that info from localStorage.
-        removeItem(expirationKey(key));
+        removeItem(expiresInKey);
       }
     },
 
