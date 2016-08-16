@@ -22,6 +22,15 @@ var startTests = function (lscache) {
     }
   });
 
+  function getLocalStorageSize(){
+    var size = 0, keyIndex = 0, key = null;
+    while((key = localStorage.key(keyIndex))){
+      size = size + key.length + localStorage.getItem(key).length;
+      keyIndex++;
+    }
+    return size;
+  }
+
   test('Testing set() and get() with string', function() {
     var key = 'thekey';
     var value = 'thevalue';
@@ -103,19 +112,25 @@ var startTests = function (lscache) {
           break;
         }
       }
+
+      equal(getLocalStorageSize(), 2621200, "Expect localStorage size to be 2621200"); // 2.5mb limit in phantom js
+
       localStorage.clear();
+
+      equal(getLocalStorageSize(), 0, "Expect localStorage size to be 0");
 
       for (var i = 0; i <= num; i++) {
         lscache.set("key" + i, longString);
       }
 
       // Warnings not enabled, nothing should be logged
-      equal(window.console.calls, 0);
+      equal(window.console.calls, 0, "We expect that we have not triggered any warnings yet");
 
       lscache.enableWarnings(true);
 
-      lscache.set("key" + i, longString);
-      equal(window.console.calls, 1, "We expect one warning to have been printed");
+      // set a very long string, such that lscache will need to remove two other keys to make space for it
+      lscache.set("key" + i, longString + longString);
+      equal(window.console.calls, 2, "We expect two warnings to have been printed");
 
       window.console = null;
       lscache.set("key" + i, longString);
